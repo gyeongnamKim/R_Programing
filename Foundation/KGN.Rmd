@@ -1,0 +1,418 @@
+---
+title: "portfolio"
+author: "KGN"
+date: '2021 8 16 '
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1. keras package 내 Boston Housing Price 데이터셋과 함수를 이용 다중회귀분석을 수행하시오.
+
+사용해야할 라이브러리를 불러온다.
+(라이브러리 참고 링크)
+# https://keras.rstudio.com/
+# https://tensorflow.rstudio.com/guide/tfdatasets/introduction/
+```{r, include=FALSE}
+library(keras)
+library(kerasR)
+library(tfdatasets)
+library(dplyr)
+library(ggplot2)
+library(MLmetrics)
+```
+
+keras에서 사용할 데이터 셋 불러오기
+(데이터 셋 정보)
+# http://lib.stat.cmu.edu/datasets/boston
+```{r, include=FALSE}
+boston_housing <- dataset_boston_housing()
+
+c(train_data, train_labels) %<-% boston_housing$train
+c(test_data, test_labels) %<-% boston_housing$test
+```
+
+트레이닝 데이터의 길이를 확인
+```{r}
+paste0("Training entries: ", length(train_data), ", labels: ", length(train_labels))
+```
+
+#입력 데이터 기능 각각은 다른 척도를 사용하여 저장된다. 일부 컬럼은 0과 1 사이의 비율로 표시되고, 다른 컬럼은 1과 12 사이의 범위, 나머지는 0과 100 사이의 범위 등으로 표시됩니다.
+```{r}
+#열 이름을 추가
+column_names <- c('CRIM', 'ZN', 'INDUS', 'CHAS', 'NOX', 'RM', 'AGE', 
+                  'DIS', 'RAD', 'TAX', 'PTRATIO', 'B', 'LSTAT')
+
+train_df <- train_data %>% 
+  as_tibble(.name_repair = "minimal") %>% 
+  setNames(column_names) %>% 
+  mutate(label = train_labels)
+
+test_df <- test_data %>% 
+  as_tibble(.name_repair = "minimal") %>% 
+  setNames(column_names) %>% 
+  mutate(label = test_labels)
+```
+정규화 후 확인
+```{r , include=FALSE}
+spec <- feature_spec(train_df, label ~ . ) %>% 
+  step_numeric_column(all_numeric(), normalizer_fn = scaler_standard()) %>% 
+  fit()
+```
+```{r}
+spec
+```
+
+layer_dense_features을 사용하여 TensorFlow  그래프에서 직접 사전처리를
+수행할 수 있도록 레이어를 생성한다.
+# 스케일된 값이 있는 행렬을 반환합니다.(2차원 Tensor라는 의미)
+```{r}
+layer <- layer_dense_features(
+  feature_columns = dense_features(spec), 
+  dtype = tf$float32
+)
+layer(train_df)
+```
+
+모델 만들기
+```{r}
+input <- layer_input_from_dataset(train_df %>% select(-label))
+
+output <- input %>% 
+  layer_dense_features(dense_features(spec)) %>% 
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 1) 
+
+model <- keras_model(input, output)
+
+summary(model)
+```
+
+모델 컴파일
+```{r, include=FALSE}
+model %>% 
+  compile(
+    loss = "mse",
+    optimizer = optimizer_rmsprop(),
+    metrics = list("mean_absolute_error")
+  )
+```
+
+재사용할 수 있게 모델 구축 코드를 함수화한다.
+```{r}
+build_model <- function() {
+  input <- layer_input_from_dataset(train_df %>% select(-label))
+  
+  output <- input %>% 
+    layer_dense_features(dense_features(spec)) %>% 
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_dense(units = 1) 
+  
+  model <- keras_model(input, output)
+  
+  model %>% 
+    compile(
+      loss = "mse",
+      optimizer = optimizer_rmsprop(),
+      metrics = list("mean_absolute_error")
+    )
+}
+```
+
+모델 훈련
+# 모델은 500에포크 동안 훈련한다.
+```{r, include=FALSE}
+print_dot_callback <- callback_lambda(
+  on_epoch_end = function(epoch, logs) {
+    if (epoch %% 80 == 0) cat("\n")
+    cat(".")
+  }
+)
+
+model <- build_model()
+early_stop <- callback_early_stopping(monitor = "val_loss", patience = 20)
+history <- model %>% fit(
+  x = train_df %>% select(-label),
+  y = train_df$label,
+  epochs = 500,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = list(print_dot_callback)
+)
+```
+
+모델의 학습 진행 상황을 시각화
+# 에포크 200이후부터 모델의 개선이 거의 없음을 보여준다.
+```{r}
+plot(history)
+```
+
+모델 재생성
+```{r,include=FALSE}
+model <- build_model()
+early_stop <- callback_early_stopping(monitor = "val_loss", patience = 20)
+history <- model %>% fit(
+  x = train_df %>% select(-label),
+  y = train_df$label,
+  epochs = 500,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = list(early_stop)
+)
+```
+
+모델 재 확인
+# 에포크가 증가하면서 개선이 보이지 않으면 자동으로 훈련을 중지한다.
+# early_stop <- callback_early_stopping(monitor = "val_loss", patience = 20)
+# callbacks = list(early_stop)의 기능
+```{r}
+plot(history)
+```
+
+테스트 모델의 테스트 세트의 평균 절대 오차 확인
+```{r}
+c(loss, mae) %<-% (model %>% evaluate(test_df %>% select(-label), test_df$label, verbose = 0))
+paste0("MAE: $", sprintf("%.2f", mae * 1000))
+```
+
+테스트 모델의 데이터를 사용하여 주택의 가격을 예측해본다.
+```{r}
+test_predictions <- model %>% predict(test_df %>% select(-label))
+test_predictions[ , 1]
+```
+## MSE는 회귀 문제에 사용되는 일반적인 손실 함수이다.
+## 회귀에 사용되는 평가 메트릭스는 분류와 다르다.
+## 일반적인 회귀 메트릭스는 MAE이다.
+## 훈련 데이터가 많지 않으면 과적합을 피하기 위해 숨겨진 계층은 거의 없는 작은 네트워크를 선호한다.
+## 조기 중지는 과적합을 방지하기 위한 유용한 기술이다.
+
+
+2. keras package 내 Boston Housing Price 데이터셋 대상으로 기존의 R 함수를
+이용하여 다중회귀분석을 실행하고 (1)번의 결과와 비교하시오
+
+keras에서 사용할 데이터 셋 불러오기
+(데이터 셋 정보)
+# http://lib.stat.cmu.edu/datasets/boston
+```{r, include=FALSE}
+boston_housing <- dataset_boston_housing()
+
+c(train_data, train_labels) %<-% boston_housing$train
+c(test_data, test_labels) %<-% boston_housing$test
+```
+
+
+데이터를 표준화하고 데이터 프레임화 한다.
+# 데이터 전처리
+```{r}
+mean <- apply(train_data, 2, mean)                                  
+sd <- apply(train_data, 2, sd)
+
+train_data <- scale(train_data, center = mean, scale = sd)         
+test_data <- scale(test_data, center = mean, scale = sd)
+
+train <- cbind(train_data,train_labels)
+test <- cbind(test_data,test_labels)
+
+train_df <- as.data.frame(train)
+test_df <- as.data.frame(test)
+# 컬럼명 지정
+colnames(train_df) = c('CRIM','ZN','INDUS','CHAS','NOX','RM','AGE','DIS','RAD','TAX','PTRATIO','B','KSTAT','MEDV')
+colnames(test_df) = c('CRIM','ZN','INDUS','CHAS','NOX','RM','AGE','DIS','RAD','TAX','PTRATIO','B','KSTAT','MEDV')
+```
+
+
+회귀 분석 실행
+```{r}
+train_model <-lm(MEDV ~ .,train_df)
+summary(train_model)
+```
+
+생성된 모델로 MEDV 값 예측
+```{r}
+temp_pred <- predict(train_model,data=test_df,type = "response")
+
+mae <- MAE(temp_pred,train_df$MEDV)
+paste0(sprintf("%.2f", mae * 1000))
+```
+## 딥러닝을 이용한 다중 회귀분석 MEDV 예측값 : 3118.94
+## 일반 다중회귀분석 MEDV 예측값             : 3351.74
+
+
+3. ‘Deep Learning with R’ 교재 내 5.2 Using convnets with small datasets 섹션에서 개와 고양이의 이미지 분류 문제에서 다음 조건을 고려하여 실행하시오.
+
+
+경로를 설정하고 작업 디렉토리 생성
+```{r}
+original_dataset_dir <- "./archive"
+base_dir <- "./cats_and_dogs_small"
+dir.create(base_dir)
+
+train_dir <- file.path(base_dir, "train")
+dir.create(train_dir)
+validation_dir <- file.path(base_dir, "validation")
+dir.create(validation_dir)
+test_dir <- file.path(base_dir, "test")
+dir.create(test_dir)
+
+train_cats_dir <- file.path(train_dir, "cats")
+dir.create(train_cats_dir)
+
+train_dogs_dir <- file.path(train_dir, "dogs")
+dir.create(train_dogs_dir)
+
+validation_cats_dir <- file.path(validation_dir, "cats")
+dir.create(validation_cats_dir)
+
+validation_dogs_dir <- file.path(validation_dir, "dogs")
+dir.create(validation_dogs_dir)
+
+test_cats_dir <- file.path(test_dir, "cats")
+dir.create(test_cats_dir)
+
+test_dogs_dir <- file.path(test_dir, "dogs")
+dir.create(test_dogs_dir)
+```
+
+```{r, include=FALSE}
+fnames <- paste0("cat.", 2001:3000, ".jpg")
+file.copy(file.path(original_dataset_dir, fnames), 
+          file.path(train_cats_dir)) 
+
+fnames <- paste0("cat.", 3001:3500, ".jpg")
+file.copy(file.path(original_dataset_dir, fnames), 
+          file.path(validation_cats_dir))
+
+fnames <- paste0("cat.", 3501:4000, ".jpg")
+file.copy(file.path(original_dataset_dir, fnames),
+          file.path(test_cats_dir))
+
+fnames <- paste0("dog.", 4001:5000, ".jpg")
+file.copy(file.path(original_dataset_dir, fnames),
+          file.path(train_dogs_dir))
+
+fnames <- paste0("dog.", 5001:5500, ".jpg")
+file.copy(file.path(original_dataset_dir, fnames),
+          file.path(validation_dogs_dir)) 
+
+fnames <- paste0("dog.", 5501:6000, ".jpg")
+file.copy(file.path(original_dataset_dir, fnames),
+          file.path(test_dogs_dir))
+```
+
+VGG16 모델 인스턴트화
+```{r}
+conv_base <- application_vgg16(
+  weights = "imagenet",
+  include_top = FALSE,
+  input_shape = c(150, 150, 3)
+)
+```
+
+VGG16 모델 확인
+```{r}
+summary(conv_base)
+```
+
+데이터 증강을 통한 특징 추출
+# 위의 모델에 모델을 추가
+```{r}
+model <- keras_model_sequential() %>% 
+  conv_base %>% 
+  layer_flatten() %>% 
+  layer_dense(units = 256, activation = "relu") %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+```
+
+모델 확인
+```{r}
+summary(model)
+```
+
+freeze_weights함수로 네트워크 사용량을을 고정
+```{r}
+length(model$trainable_weights)
+freeze_weights(conv_base)
+length(model$trainable_weights)
+
+train_datagen = image_data_generator(
+  rescale = 1/255,
+  rotation_range = 40,
+  width_shift_range = 0.2,
+  height_shift_range = 0.2,
+  shear_range = 0.2,
+  zoom_range = 0.2,
+  horizontal_flip = TRUE,
+  fill_mode = "nearest"
+)
+```
+
+일반화
+# 유효성 검사 데이터가 증가되어서는 안된다다
+```{r}
+test_datagen <- image_data_generator(rescale = 1/255)  
+
+train_generator <- flow_images_from_directory(
+  train_dir,                  # Target directory  
+  train_datagen,              # Data generator
+  target_size = c(150, 150),  # Resizes all images to 150 × 150
+  batch_size = 20,
+  class_mode = "binary"       # binary_crossentropy loss for binary labels
+)
+
+validation_generator <- flow_images_from_directory(
+  validation_dir,
+  test_datagen,
+  target_size = c(150, 150),
+  batch_size = 20,
+  class_mode = "binary"
+)
+
+model %>% compile(
+  loss = "binary_crossentropy",
+  optimizer = optimizer_rmsprop(lr = 2e-5),
+  metrics = c("accuracy")
+)
+
+history <- model %>% fit_generator(
+  train_generator,
+  steps_per_epoch = 100,
+  epochs = 30,
+  validation_data = validation_generator,
+  validation_steps = 50
+)
+```
+
+```{r}
+plot(history_ml)
+```
+
+```{r}
+unfreeze_weights(conv_base, from = "block3_conv1")
+```
+
+```{r}
+model %>% compile(
+  loss = "binary_crossentropy",
+  optimizer = optimizer_rmsprop(lr = 1e-5),
+  metrics = c("accuracy")
+)
+
+history <- model %>% fit_generator(
+  train_generator,
+  steps_per_epoch = 100,
+  epochs = 100,
+  validation_data = validation_generator,
+  validation_steps = 50
+)
+```
+
+```{r}
+plot(history_ml)
+```
+
+# 2) 분류의 정확성을 높이기 위한 방법과 사용자가 조정할 수 있는 parameter는 무엇인지 기술하시오.
+
+## epochs 값이 10부터 정확도가 올라간다 20번 정도 학습시키면 좋은 결과가 나올거 같다.
